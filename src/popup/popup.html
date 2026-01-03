@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Confluence2Notion</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>📄 Confluence2Notion</h1>
+    </header>
+
+    <!-- Settings View -->
+    <div id="settings-view" class="view">
+      <div class="form-group">
+        <label for="api-token">Notion API Token</label>
+        <input type="password" id="api-token" placeholder="secret_xxxxx...">
+        <small>Get it from <a href="https://www.notion.so/my-integrations" target="_blank">notion.so/my-integrations</a></small>
+      </div>
+      
+      <div class="form-group">
+        <label for="parent-page-id">Default Parent Page ID</label>
+        <input type="text" id="parent-page-id" placeholder="https://www.notion.so/PageName-2dadca9a3fff80278295e23720dd2a53">
+        <small>Enter Notion page URL or page ID (32-character hex string)</small>
+      </div>
+      
+      <button id="save-settings" class="btn btn-primary">Save Settings</button>
+    </div>
+
+    <!-- Main View -->
+    <div id="main-view" class="view hidden">
+      <div id="page-info">
+        <div class="page-title">
+          <span class="label">Current Page:</span>
+          <span id="confluence-title">-</span>
+        </div>
+        <div class="target-info">
+          <span class="label">Target:</span>
+          <span id="target-page">-</span>
+          <button id="change-target" class="btn-link">Change</button>
+        </div>
+      </div>
+
+      <div class="options">
+        <label class="checkbox">
+          <input type="checkbox" id="include-images" checked>
+          <span>Include images</span>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="add-source-link" checked>
+          <span>Add source link</span>
+        </label>
+      </div>
+
+      <button id="send-to-notion" class="btn btn-primary btn-large">
+        🚀 Send to Notion
+      </button>
+      
+      <button id="download-internal-images" class="btn btn-secondary btn-large">
+        📦 Download Internal Images
+      </button>
+      
+      <button id="open-settings" class="btn btn-secondary">⚙️ Settings</button>
+    </div>
+
+    <!-- Processing View -->
+    <div id="processing-view" class="view hidden">
+      <div class="spinner"></div>
+      <p id="processing-status">Processing...</p>
+      <div class="progress-bar">
+        <div id="progress" class="progress"></div>
+      </div>
+      <div id="progress-percentage" class="progress-percentage">0%</div>
+    </div>
+
+    <!-- Success View -->
+    <div id="success-view" class="view hidden">
+      <div class="success-icon">✅</div>
+      <h2>Success!</h2>
+      <p>Page created in Notion</p>
+      <a id="notion-link" href="#" target="_blank" class="btn btn-primary">Open in Notion</a>
+      <button id="done" class="btn btn-secondary">Done</button>
+    </div>
+
+    <!-- Error View -->
+    <div id="error-view" class="view hidden">
+      <div class="error-icon">❌</div>
+      <h2>Error</h2>
+      <p id="error-message">Something went wrong</p>
+      <button id="retry" class="btn btn-primary">Retry</button>
+      <button id="back" class="btn btn-secondary">Back</button>
+    </div>
+
+    <!-- Not Confluence View -->
+    <div id="not-confluence-view" class="view hidden">
+      <div class="info-icon">ℹ️</div>
+      <p>Please navigate to a Confluence page to use this extension.</p>
+    </div>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
