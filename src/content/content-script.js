@@ -138,10 +138,26 @@ function initTurndown() {
     linkStyle: 'inlined',
   });
   
-  // Add GFM plugin if available
+  // Add GFM plugin for strikethrough only (tables are pre-processed)
   if (typeof turndownPluginGfm !== 'undefined') {
-    turndownService.use(turndownPluginGfm.gfm);
+    if (turndownPluginGfm.strikethrough) {
+      turndownService.use(turndownPluginGfm.strikethrough);
+    }
+    console.log('Confluence2Notion: GFM strikethrough loaded');
   }
+  
+  // Rule for pre-processed tables (converted before Turndown)
+  // Markdown is stored in data-table-markdown attribute to avoid escaping
+  turndownService.addRule('preprocessedTable', {
+    filter: function(node) {
+      return node.hasAttribute && node.hasAttribute('data-table-markdown');
+    },
+    replacement: function(content, node) {
+      // Read markdown directly from attribute (not textContent which gets escaped)
+      const markdown = node.getAttribute('data-table-markdown');
+      return '\n\n' + markdown + '\n\n';
+    }
+  });
   
   // Custom rule for nested lists - ensure proper indentation
   // This overrides default behavior to ensure consistent 2-space indentation
@@ -248,103 +264,6 @@ function initTurndown() {
       }
       
       return `\n\n${fence}${language ? ' ' + language : ''}\n${codeContent}\n${fence}\n\n`;
-    },
-  });
-  
-  // Custom rule for Confluence tables - handle tables with rowspan/colspan
-  // This properly handles merged cells by tracking spans across rows
-  turndownService.addRule('confluenceTable', {
-    filter: function (node) {
-      if (node.nodeName !== 'TABLE') return false;
-      const rows = node.querySelectorAll('tr');
-      if (rows.length === 0) return false;
-      const firstRow = rows[0];
-      const firstRowCells = firstRow.querySelectorAll('th, td');
-      return firstRowCells.length > 0;
-    },
-    replacement: function (content, node) {
-      const rows = Array.from(node.querySelectorAll('tr'));
-      if (rows.length === 0) return '';
-      
-      // First pass: determine the actual column count by examining the first row
-      // including colspan values
-      let columnCount = 0;
-      const firstRowCells = rows[0].querySelectorAll('th, td');
-      firstRowCells.forEach(cell => {
-        const colspan = parseInt(cell.getAttribute('colspan')) || 1;
-        columnCount += colspan;
-      });
-      
-      // Create a 2D grid to track cell content (handles rowspan/colspan)
-      // grid[row][col] = cell content
-      const grid = [];
-      for (let i = 0; i < rows.length; i++) {
-        grid[i] = new Array(columnCount).fill(null);
-      }
-      
-      // Second pass: fill the grid, handling rowspan and colspan
-      rows.forEach((row, rowIndex) => {
-        const cells = row.querySelectorAll('td, th');
-        let colIndex = 0;
-        
-        cells.forEach(cell => {
-          // Find the next available column in this row
-          while (colIndex < columnCount && grid[rowIndex][colIndex] !== null) {
-            colIndex++;
-          }
-          
-          if (colIndex >= columnCount) return;
-          
-          const rowspan = parseInt(cell.getAttribute('rowspan')) || 1;
-          const colspan = parseInt(cell.getAttribute('colspan')) || 1;
-          
-          // Get cell content
-          let text = cell.textContent || '';
-          text = text.trim().replace(/\n+/g, ' ').replace(/\s+/g, ' ');
-          text = text.replace(/\|/g, '\\|');
-          text = text || ' ';
-          
-          // Fill the grid for this cell's span
-          for (let r = 0; r < rowspan && (rowIndex + r) < rows.length; r++) {
-            for (let c = 0; c < colspan && (colIndex + c) < columnCount; c++) {
-              if (r === 0 && c === 0) {
-                // First cell gets the content
-                grid[rowIndex + r][colIndex + c] = text;
-              } else {
-                // Spanned cells get empty string (placeholder)
-                grid[rowIndex + r][colIndex + c] = ' ';
-              }
-            }
-          }
-          
-          colIndex += colspan;
-        });
-      });
-      
-      // Debug: log the grid
-      console.log('Confluence2Notion: Table grid created', {
-        rows: rows.length,
-        columns: columnCount,
-        firstRow: grid[0]
-      });
-      
-      // Third pass: generate Markdown from the grid
-      let markdown = '\n\n';
-      
-      grid.forEach((rowData, rowIndex) => {
-        // Fill any remaining null cells with space
-        const cellContents = rowData.map(cell => cell === null ? ' ' : cell);
-        
-        markdown += '| ' + cellContents.join(' | ') + ' |\n';
-        
-        // Add separator after first row (header)
-        if (rowIndex === 0) {
-          const separator = '|' + ' --- |'.repeat(columnCount) + '\n';
-          markdown += separator;
-        }
-      });
-      
-      return markdown + '\n';
     },
   });
   
@@ -718,6 +637,178 @@ function handleCheckPage() {
 }
 
 /**
+ * Convert a single table element to Markdown
+ * Handles rowspan and colspan properly
+ */
+function convertTableToMarkdown(tableElement) {
+  // Get header rows (from thead) and body rows (from tbody) separately
+  const thead = tableElement.querySelector('thead');
+  const tbody = tableElement.querySelector('tbody');
+  
+  let headerRows = [];
+  let bodyRows = [];
+  
+  if (thead) {
+    headerRows = Array.from(thead.querySelectorAll('tr'));
+  }
+  if (tbody) {
+    bodyRows = Array.from(tbody.querySelectorAll('tr'));
+  }
+  
+  // If no thead/tbody structure, get all rows
+  if (headerRows.length === 0 && bodyRows.length === 0) {
+    const allRows = Array.from(tableElement.querySelectorAll('tr'));
+    if (allRows.length > 0) {
+      headerRows = [allRows[0]];
+      bodyRows = allRows.slice(1);
+    }
+  }
+  
+  // Combine: header rows first, then body rows
+  const rows = [...headerRows, ...bodyRows];
+  
+  if (rows.length === 0) return '';
+  
+  // Calculate max columns
+  let columnCount = 0;
+  rows.forEach(row => {
+    let rowCols = 0;
+    row.querySelectorAll('th, td').forEach(cell => {
+      rowCols += parseInt(cell.getAttribute('colspan')) || 1;
+    });
+    columnCount = Math.max(columnCount, rowCols);
+  });
+  
+  if (columnCount === 0) return '';
+  
+  console.log('Confluence2Notion: Converting table', rows.length, 'rows x', columnCount, 'cols');
+  console.log('Confluence2Notion: Header rows:', headerRows.length, 'Body rows:', bodyRows.length);
+  
+  // Create grid
+  const grid = [];
+  for (let i = 0; i < rows.length; i++) {
+    grid[i] = new Array(columnCount).fill(null);
+  }
+  
+  // Fill the grid
+  rows.forEach((row, rowIndex) => {
+    const cells = row.querySelectorAll('td, th');
+    let colIndex = 0;
+    
+    cells.forEach(cell => {
+      // Skip already filled cells
+      while (colIndex < columnCount && grid[rowIndex][colIndex] !== null) {
+        colIndex++;
+      }
+      if (colIndex >= columnCount) return;
+      
+      const rowspan = parseInt(cell.getAttribute('rowspan')) || 1;
+      const colspan = parseInt(cell.getAttribute('colspan')) || 1;
+      
+      // Get text and preserve bold
+      let text = '';
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = cell.innerHTML || '';
+      
+      // Convert bold to **text**
+      tempDiv.querySelectorAll('strong, b').forEach(el => {
+        const boldText = el.textContent || '';
+        el.replaceWith(`**${boldText}**`);
+      });
+      
+      text = (tempDiv.textContent || '').trim()
+        .replace(/\n+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/\|/g, '\\|');
+      
+      // Fill grid
+      for (let r = 0; r < rowspan && (rowIndex + r) < rows.length; r++) {
+        for (let c = 0; c < colspan && (colIndex + c) < columnCount; c++) {
+          grid[rowIndex + r][colIndex + c] = (r === 0 && c === 0) ? text : '';
+        }
+      }
+      
+      colIndex += colspan;
+    });
+  });
+  
+  // Fill remaining nulls
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < columnCount; c++) {
+      if (grid[r][c] === null) grid[r][c] = '';
+    }
+  }
+  
+  // Remove duplicate rows (sometimes Confluence has duplicate header in tbody)
+  const uniqueGrid = [];
+  const seenRows = new Set();
+  grid.forEach((rowData, rowIndex) => {
+    const rowKey = rowData.join('|');
+    // Always keep first row (header), then check for duplicates
+    if (rowIndex === 0 || !seenRows.has(rowKey)) {
+      uniqueGrid.push(rowData);
+      seenRows.add(rowKey);
+    } else {
+      console.log('Confluence2Notion: Removing duplicate row:', rowKey.substring(0, 50) + '...');
+    }
+  });
+  
+  // Generate Markdown
+  const lines = [];
+  uniqueGrid.forEach((rowData, rowIndex) => {
+    lines.push('| ' + rowData.join(' | ') + ' |');
+    if (rowIndex === 0) {
+      lines.push('| ' + Array(columnCount).fill('---').join(' | ') + ' |');
+    }
+  });
+  
+  const result = lines.join('\n');
+  console.log('Confluence2Notion: Table converted:\n' + result);
+  return result;
+}
+
+/**
+ * Pre-process HTML to convert tables before Turndown
+ */
+function preprocessTablesInHtml(htmlContent) {
+  // Create a temporary container
+  const container = document.createElement('div');
+  container.innerHTML = htmlContent;
+  
+  // IMPORTANT: First, extract tables that are inside <pre> or <code> elements
+  // These should be treated as tables, not code blocks
+  const preElements = container.querySelectorAll('pre, code');
+  preElements.forEach(pre => {
+    const nestedTables = pre.querySelectorAll('table');
+    nestedTables.forEach(table => {
+      console.log('Confluence2Notion: Found table inside pre/code, extracting');
+      // Move the table out of the pre element
+      pre.parentNode.insertBefore(table, pre);
+    });
+    // If the pre element is now empty or only has whitespace, remove it
+    if (pre.textContent.trim() === '' || pre.querySelectorAll('*').length === 0) {
+      pre.remove();
+    }
+  });
+  
+  // Find and convert all tables
+  const tables = container.querySelectorAll('table');
+  console.log('Confluence2Notion: Found', tables.length, 'tables to preprocess');
+  
+  tables.forEach((table, index) => {
+    const markdown = convertTableToMarkdown(table);
+    // Replace table with a div that stores markdown in data attribute
+    // This prevents Turndown from escaping special characters like * and _
+    const placeholder = document.createElement('div');
+    placeholder.setAttribute('data-table-markdown', markdown);
+    placeholder.textContent = '[TABLE]'; // Dummy content
+    table.replaceWith(placeholder);
+  });
+  
+  return container.innerHTML;
+}
+
+/**
  * Handle GET_MARKDOWN message
  * @param {Object} options - Conversion options
  * @returns {Object} Markdown conversion result
@@ -736,6 +827,9 @@ function handleGetMarkdown(options = {}) {
     
     const { title, htmlContent, metadata } = parseResult.data;
     
+    // Pre-process tables BEFORE Turndown
+    const processedHtml = preprocessTablesInHtml(htmlContent);
+    
     // Initialize Turndown
     const turndownService = initTurndown();
     
@@ -747,7 +841,7 @@ function handleGetMarkdown(options = {}) {
     }
     
     // Convert to Markdown
-    let markdown = turndownService.turndown(htmlContent);
+    let markdown = turndownService.turndown(processedHtml);
     
     // Clean up markdown
     markdown = cleanupMarkdown(markdown);
@@ -785,48 +879,54 @@ function cleanupMarkdown(markdown) {
   let cleaned = markdown;
   const originalLength = cleaned.length;
   
+  // IMPORTANT: Fix tables that were incorrectly wrapped in code blocks
+  // Pattern: ```\n| header |\n| --- |\n...\n```
+  // This happens when Confluence has tables inside <pre> or similar containers
+  cleaned = cleaned.replace(/```[^\n]*\n(\|[^\n]+\|\n\|[\s-|]+\|\n(?:\|[^\n]+\|\n?)+)```/g, (match, tableContent) => {
+    console.log('Confluence2Notion: Unwrapping table from code block');
+    return '\n\n' + tableContent.trim() + '\n\n';
+  });
+  
+  // Also handle tables with language specifier: ```markdown\n| ... |
+  cleaned = cleaned.replace(/```(?:markdown|text|)?\s*\n(\|[^\n]+\|\n\|[\s-|]+\|\n(?:\|[^\n]+\|\n?)+)\n?```/g, (match, tableContent) => {
+    console.log('Confluence2Notion: Unwrapping table from code block (with language)');
+    return '\n\n' + tableContent.trim() + '\n\n';
+  });
+  
   // Fix malformed nested list patterns like "-   - item" -> "  - item"
-  // This happens when Confluence has empty list items containing nested lists
   cleaned = cleaned.replace(/^-\s+- /gm, '  - ');
   cleaned = cleaned.replace(/^-\s{2,}- /gm, '  - ');
   
   // Fix numbered list variant: "1.   - item" -> "  - item"
   cleaned = cleaned.replace(/^\d+\.\s+- /gm, '  - ');
   
-  // Fix deeply nested malformed patterns: "-   -   - " -> "    - "
+  // Fix deeply nested malformed patterns
   cleaned = cleaned.replace(/^-\s+- +- /gm, '    - ');
   cleaned = cleaned.replace(/^-\s+-\s+- /gm, '    - ');
   
-  // Fix empty list items: "- \n" followed by anything -> remove the empty item
+  // Fix empty list items
   cleaned = cleaned.replace(/^- *\n(\s*[-*\d])/gm, '$1');
   
-  // IMPORTANT: Remove blank lines between list items that should be connected
-  // Pattern: list item ending, then blank line(s), then indented list item
-  // This ensures nested lists stay connected to their parents
+  // Remove blank lines between connected list items
   cleaned = cleaned.replace(/^(- .+)\n\n+(\s+- )/gm, '$1\n$2');
   cleaned = cleaned.replace(/^(\s+- .+)\n\n+(\s+- )/gm, '$1\n$2');
-  
-  // Also handle: parent item, blank line, then child item with "-   - " pattern that we'll fix
-  // First identify pattern: "- parent:\n\n-   - child" and fix it
   cleaned = cleaned.replace(/^(- [^\n]+:)\n\n+-\s+- /gm, '$1\n  - ');
   
-  // Fix case where there's a list item followed by blank lines and then deeply indented items
-  // Pattern: "  - item:\n\n        - subitem" -> "  - item:\n    - subitem"
+  // Fix deeply indented subitems
   cleaned = cleaned.replace(/^(\s*- [^\n]+)\n\n+(\s{4,}- )/gm, (match, item, subitem) => {
-    // Normalize subitem indentation: find current indent and make it 2 more than parent
     const parentIndent = item.match(/^(\s*)/)[1].length;
     const subitemContent = subitem.replace(/^\s+/, '');
     const newIndent = ' '.repeat(parentIndent + 2);
     return `${item}\n${newIndent}${subitemContent}`;
   });
   
-  // Remove excessive blank lines (more than 2)
+  // Remove excessive blank lines
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   
-  // Remove trailing whitespace on each line
+  // Remove trailing whitespace
   cleaned = cleaned.replace(/[ \t]+$/gm, '');
   
-  // Log if we made any changes
+  // Log changes
   if (cleaned.length !== originalLength) {
     console.log('Confluence2Notion: cleanupMarkdown fixed formatting', {
       originalLength: originalLength,
@@ -835,7 +935,6 @@ function cleanupMarkdown(markdown) {
     });
   }
   
-  // Ensure single newline at end
   return cleaned.trim() + '\n';
 }
 

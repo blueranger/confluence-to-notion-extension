@@ -1420,65 +1420,57 @@ function buildNestedList(items, listType, baseIndent) {
   }
   
   /**
-   * Convert tree nodes to Notion blocks with children property
-   * Notion API supports up to 2 levels of nesting in children
-   * For deeper nesting, we collect them separately and add after the parent
+   * Flatten tree structure to a linear array with proper nesting
+   * Notion API: depth 0 and 1 can have children, depth 2 cannot
+   * 
+   * Structure:
+   * - depth 0 = Level 1 (top) - CAN have children
+   * - depth 1 = Level 2 - CAN have children  
+   * - depth 2 = Level 3 - CANNOT have children, but displays fine (no marker needed)
+   * - depth 3+ = Level 4+ - needs markers [ind4], [ind5]... (flattened after Level 3 parent)
    */
-  function convertNodeToBlock(node, depth, overflowBlocks) {
-    const block = createListItemBlock(node.item.content, node.item.checked);
-    
-    if (node.children.length > 0) {
-      const blockType = block.type;
+  function flattenTreeToBlocks(nodes, depth, resultArray) {
+    for (const node of nodes) {
+      let content = node.item.content;
       
-      // Notion API limitation: children can only be nested 2 levels deep
-      // depth 0 -> children allowed (they become depth 1)
-      // depth 1 -> children allowed (they become depth 2)
-      // depth 2+ -> children NOT allowed, must be flattened
+      // Only add marker for depth >= 3 (Level 4+)
+      // depth 2 (Level 3) can display in Notion but cannot have children
+      if (depth >= 3) {
+        const level = depth + 1;
+        const marker = `[ind${level}]`;
+        content = `${marker} ${content}`;
+        console.log('Confluence2Notion: Adding indent marker', {
+          depth: depth,
+          level: level,
+          marker: marker,
+          content: content.substring(0, 50)
+        });
+      }
       
-      if (depth < 2) {
-        // Can add children at this level
+      const block = createListItemBlock(content, node.item.checked);
+      
+      if (depth < 2 && node.children.length > 0) {
+        // depth 0 and 1: can use Notion's native children
+        const blockType = block.type;
         block[blockType].children = [];
         
-        for (const child of node.children) {
-          const childBlock = convertNodeToBlock(child, depth + 1, overflowBlocks);
-          block[blockType].children.push(childBlock);
-        }
-      } else {
-        // Cannot nest deeper than 2 levels
-        // Add children to overflow array - they'll be appended at root level
-        console.log('Confluence2Notion: Flattening deeply nested list item', {
-          depth: depth,
-          childCount: node.children.length,
-          content: node.item.content.substring(0, 50)
-        });
-        
-        for (const child of node.children) {
-          const childBlock = convertNodeToBlock(child, depth + 1, overflowBlocks);
-          overflowBlocks.push(childBlock);
-        }
+        // Recursively process children
+        flattenTreeToBlocks(node.children, depth + 1, block[blockType].children);
+      } else if (node.children.length > 0) {
+        // depth >= 2: cannot have children in Notion
+        // Add current block, then flatten its children after it
+        resultArray.push(block);
+        flattenTreeToBlocks(node.children, depth + 1, resultArray);
+        continue; // Skip the push at the end since we already added it
       }
+      
+      resultArray.push(block);
     }
-    
-    return block;
   }
   
   // Convert all root nodes to blocks
-  // overflowBlocks collects any deeply nested items that can't fit in Notion's 2-level limit
   const blocks = [];
-  const overflowBlocks = [];
-  
-  for (const rootNode of rootNodes) {
-    const block = convertNodeToBlock(rootNode, 0, overflowBlocks);
-    blocks.push(block);
-  }
-  
-  // Append any overflow blocks at the end (these are items that were too deeply nested)
-  if (overflowBlocks.length > 0) {
-    console.log('Confluence2Notion: Adding overflow blocks from deep nesting', {
-      count: overflowBlocks.length
-    });
-    blocks.push(...overflowBlocks);
-  }
+  flattenTreeToBlocks(rootNodes, 0, blocks);
   
   console.log('Confluence2Notion: Final nested list blocks', {
     inputItemCount: items.length,
@@ -1534,7 +1526,24 @@ async function createNotionPage({ title, markdown, parentPageId, apiToken, sourc
   sendProgressUpdate(60, 'Converting Markdown to Notion blocks...');
   
   // Convert markdown to Notion blocks
-  let blocks = markdownToNotionBlocks(markdown);
+  let blocks = markdownToNotionBlocks(markdown || '');
+  
+  // Ensure blocks is always an array
+  if (!blocks || !Array.isArray(blocks)) {
+    console.warn('Confluence2Notion: markdownToNotionBlocks returned invalid result, using empty array');
+    blocks = [];
+  }
+  
+  // If no blocks, add a placeholder paragraph
+  if (blocks.length === 0) {
+    console.warn('Confluence2Notion: No blocks generated, adding placeholder');
+    blocks.push({
+      type: 'paragraph',
+      paragraph: {
+        rich_text: [{ type: 'text', text: { content: '(Content could not be converted)' } }]
+      }
+    });
+  }
   
   sendProgressUpdate(65, `Generated ${blocks.length} blocks`);
   
